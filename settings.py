@@ -45,6 +45,10 @@ DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
         'NAME': 'helios',
+        'USER': 'helios',
+        'PASSWORD': 'helios',
+        'HOST': 'localhost',
+        'PORT': '5432',
         'CONN_MAX_AGE': 600,
     },
 }
@@ -101,7 +105,7 @@ EMAIL_OPTOUT_SECRET = get_from_env('EMAIL_OPTOUT_SECRET', 'replace-with-secure-r
 # If in production, you got a bad request (400) error
 #More info: https://docs.djangoproject.com/en/1.7/ref/settings/#allowed-hosts (same for 1.6)
 
-ALLOWED_HOSTS = get_from_env('ALLOWED_HOSTS', 'localhost').split(",")
+ALLOWED_HOSTS = ['127.0.0.1', 'localhost']
 
 # Secure Stuff
 if get_from_env('SSL', '0') == '1':
@@ -316,10 +320,10 @@ if ROLLBAR_ACCESS_TOKEN:
 
 # ldap
 # see configuration example at https://pythonhosted.org/django-auth-ldap/example.html
-AUTH_LDAP_SERVER_URI = "ldap://ldap.forumsys.com" # replace by your Ldap URI
-AUTH_LDAP_BIND_DN = "cn=read-only-admin,dc=example,dc=com"
-AUTH_LDAP_BIND_PASSWORD = "password"
-AUTH_LDAP_USER_SEARCH = LDAPSearch("dc=example,dc=com",
+AUTH_LDAP_SERVER_URI = "ldap://localhost" # replace by your Ldap URI
+AUTH_LDAP_BIND_DN = "cn=admin,dc=localhost,dc=com"
+AUTH_LDAP_BIND_PASSWORD = "cielo"
+AUTH_LDAP_USER_SEARCH = LDAPSearch("ou=People,dc=localhost,dc=com",
     ldap.SCOPE_SUBTREE, "(uid=%(user)s)"
 )
 
