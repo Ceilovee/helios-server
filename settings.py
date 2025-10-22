@@ -290,8 +290,12 @@ EMAIL_USE_TLS = (get_from_env('EMAIL_USE_TLS', '0') == '1')
 # to use AWS Simple Email Service
 # in which case environment should contain
 # AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
-if get_from_env('EMAIL_USE_AWS', '0') == '1':
-    EMAIL_BACKEND = 'django_ses.SESBackend'
+#if get_from_env('EMAIL_USE_AWS', '0') == '1':
+#    EMAIL_BACKEND = 'django_ses.SESBackend'
+    
+# otherwise, if we're testing, we just print emails to the console
+EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+
 
 # set up logging
 import logging
