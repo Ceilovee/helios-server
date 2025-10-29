@@ -534,6 +534,7 @@ def one_election_cast(request, election):
   """
   on a GET, this is a cancellation, on a POST it's a cast
   """
+  logging.info("Entering one_election_cast")
   if request.method == "GET":
     return HttpResponseRedirect(settings.SECURE_URL_HOST + reverse(url_names.election.ELECTION_VIEW, args = [election.uuid]))
     
@@ -617,6 +618,7 @@ def password_voter_login(request, election):
 @election_view()
 def one_election_cast_confirm(request, election):
   user = get_user(request)    
+  logging.info("Entering one_election_cast_confirm")
 
   # if no encrypted vote, the user is reloading this page or otherwise getting here in a bad way
   if ('encrypted_vote' not in request.session) or request.session['encrypted_vote'] is None:
@@ -653,11 +655,24 @@ def one_election_cast_confirm(request, election):
       cast_ip = request.META.get('REMOTE_ADDR', None)
 
     # prepare the vote to cast
+    # prefer client-provided timestamp if provided (milliseconds since epoch)
+    cast_at = datetime.datetime.utcnow()
+    try:
+      client_ts = request.POST.get('client_cast_at', None)
+      if client_ts:
+        # client_ts should be milliseconds since epoch (string)
+        client_ms = int(client_ts)
+        # convert to seconds and create UTC datetime
+        cast_at = datetime.datetime.utcfromtimestamp(client_ms / 1000.0)
+    except Exception:
+      # if parsing fails, fall back to server time
+      cast_at = datetime.datetime.utcnow()
+
     cast_vote_params = {
       'vote' : vote,
       'voter' : voter,
       'vote_hash': vote_fingerprint,
-      'cast_at': datetime.datetime.utcnow(),
+      'cast_at': cast_at,
       'cast_ip': cast_ip
     }
 
@@ -731,6 +746,16 @@ def one_election_cast_confirm(request, election):
       return HttpResponseRedirect(settings.SECURE_URL_HOST + reverse(one_election_cast_confirm, args=[election.uuid]))
     
     # don't store the vote in the voter's data structure until verification
+    # if the voter already has a cast_at, ensure this new vote is newer
+    try:
+      if voter.cast_at and cast_vote.cast_at <= voter.cast_at:
+        # incoming vote is older or same as already recorded vote — don't accept
+        # redirect back to confirmation page with a flag so the UI can show a message
+        return HttpResponseRedirect(settings.SECURE_URL_HOST + reverse(one_election_cast_confirm, args=[election.uuid]) + "?older_timestamp=1")
+    except Exception:
+      # on any comparison error, fall back to saving
+      pass
+
     cast_vote.save()
 
     # status update?
@@ -758,6 +783,7 @@ def one_election_cast_done(request, election):
   """
   user = get_user(request)
   voter = get_voter(request, user, election)
+  logging.info("Entering one_election_cast_done")
 
   if voter:
     votes = CastVote.get_by_voter(voter)

@@ -19,6 +19,10 @@ from .view_utils import render_template_raw
 
 @shared_task
 def cast_vote_verify_and_store(cast_vote_id, status_update_message=None, **kwargs):
+    # log entry to trace where this task was invoked from
+    logger = get_logger(cast_vote_verify_and_store.__name__)
+    logger.info(f"Entering {cast_vote_verify_and_store.__name__} (cast_vote_id={cast_vote_id})")
+
     cast_vote = CastVote.objects.get(id=cast_vote_id)
     result = cast_vote.verify_and_store()
 

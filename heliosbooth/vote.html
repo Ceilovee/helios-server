@@ -457,6 +457,7 @@ BOOTH.check_encryption_status = function() {
 };
 
 BOOTH._after_ballot_encryption = function() {
+  BOOTH.log("Entering BOOTH._after_ballot_encryption")
     // if already serialized, use that, otherwise serialize
     BOOTH.encrypted_vote_json = BOOTH.encrypted_ballot_serialized || JSON.stringify(BOOTH.encrypted_ballot.toJSONObject());
 
@@ -521,6 +522,7 @@ BOOTH.seal_ballot_raw = function() {
 };
 
 BOOTH.request_ballot_encryption = function() {
+  BOOTH.log("Entering BOOTH.request_ballot_encryption")
     $.post(BOOTH.election_url + "/encrypt-ballot", {'answers_json': $.toJSON(BOOTH.ballot.answers)}, function(result) {
       //BOOTH.encrypted_ballot = HELIOS.EncryptedVote.fromJSONObject($.secureEvalJSON(result), BOOTH.election);
       // rather than deserialize and reserialize, which is inherently slow on browsers
@@ -541,6 +543,7 @@ BOOTH.request_ballot_encryption = function() {
 };
 
 BOOTH.seal_ballot = function() {
+  BOOTH.log("Entering BOOTH.seal_ballot")
     BOOTH.show_progress('2');
 
     // if we don't have the ability to do crypto in the browser,
@@ -566,6 +569,7 @@ BOOTH.post_audited_ballot = function() {
 };
 
 BOOTH.cast_ballot = function() {
+  BOOTH.log("Entering BOOTH.cast_ballot")
     // show progress spinner
     $('#loading_div').show();
     $('#proceed_button').attr('disabled', 'disabled');
@@ -587,6 +591,16 @@ BOOTH.cast_ballot = function() {
     BOOTH.started_p = false;
 
     // submit the form
+    try {
+      // set client timestamp in milliseconds since epoch
+      var ts = new Date().getTime();
+      if (document.getElementById('client_cast_at_input')) {
+        document.getElementById('client_cast_at_input').value = ts;
+      }
+    } catch (e) {
+      // ignore; proceed to submit anyway
+    }
+
     $('#send_ballot_form').submit();
 };
 
