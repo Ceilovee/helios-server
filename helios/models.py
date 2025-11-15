@@ -32,6 +32,18 @@ class HeliosModel(models.Model, datatypes.LDObjectContainer):
   class Meta:
     abstract = True
 
+class UnconfirmedVote(models.Model):
+    """
+    Voto recibido pero no confirmado.
+    """
+    id = models.AutoField(primary_key=True)
+    vote_hash = models.CharField(max_length=100)
+    vote_tinyhash = models.CharField(max_length=50, null=True, unique=True)
+    cast_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        app_label = 'helios'
+        
 class Election(HeliosModel):
   admin = models.ForeignKey(User, on_delete=models.CASCADE)
 
