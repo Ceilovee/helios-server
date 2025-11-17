@@ -29,7 +29,7 @@ from . import forms
 from . import tasks
 from .crypto import algs, electionalgs, elgamal
 from .crypto import utils as cryptoutils
-from .models import User, Election, CastVote, Voter, VoterFile, Trustee, AuditedBallot
+from .models import User, Election, CastVote, Voter, VoterFile, Trustee, AuditedBallot, UnconfirmedVote
 from .security import (election_view, election_admin,
                        trustee_check, set_logged_in_trustee,
                        can_create_election, user_can_see_election, get_voter,
@@ -641,6 +641,10 @@ def one_election_cast_confirm(request, election):
   encrypted_vote = request.session['encrypted_vote']
   vote_fingerprint = cryptoutils.hash_b64(encrypted_vote)
 
+  # Guardar voto no confirmado
+  unconfirmed_vote = UnconfirmedVote(vote_hash=vote_fingerprint)
+  unconfirmed_vote.save()
+
   # if this user is a voter, prepare some stuff
   if voter:
     vote = datatypes.LDObject.fromDict(utils.from_json(encrypted_vote), type_hint='legacy/EncryptedVote').wrapped_obj
@@ -655,24 +659,20 @@ def one_election_cast_confirm(request, election):
       cast_ip = request.META.get('REMOTE_ADDR', None)
 
     # prepare the vote to cast
-    # prefer client-provided timestamp if provided (milliseconds since epoch)
-    cast_at = datetime.datetime.utcnow()
+
+    # Obtener el cast_at real desde UnconfirmedVote
+    unconfirmed = None
     try:
-      client_ts = request.POST.get('client_cast_at', None)
-      if client_ts:
-        # client_ts should be milliseconds since epoch (string)
-        client_ms = int(client_ts)
-        # convert to seconds and create UTC datetime
-        cast_at = datetime.datetime.utcfromtimestamp(client_ms / 1000.0)
-    except Exception:
-      # if parsing fails, fall back to server time
-      cast_at = datetime.datetime.utcnow()
+        unconfirmed = UnconfirmedVote.objects.get(vote_hash=vote_fingerprint)
+    except UnconfirmedVote.DoesNotExist:
+        pass
+    real_cast_at = unconfirmed.cast_at if unconfirmed else cast_at
 
     cast_vote_params = {
       'vote' : vote,
       'voter' : voter,
       'vote_hash': vote_fingerprint,
-      'cast_at': cast_at,
+      'cast_at': real_cast_at,
       'cast_ip': cast_ip
     }
 
@@ -748,6 +748,7 @@ def one_election_cast_confirm(request, election):
     # don't store the vote in the voter's data structure until verification
     # if the voter already has a cast_at, ensure this new vote is newer
     try:
+      # Usar el cast_at real para la comparación
       if voter.cast_at and cast_vote.cast_at <= voter.cast_at:
         # incoming vote is older or same as already recorded vote — don't accept
         # redirect back to confirmation page with a flag so the UI can show a message
@@ -1681,6 +1682,16 @@ def optout_success(request):
         'title': 'Opt-Out Confirmation Sent',
         'message': 'We have sent you a confirmation email. Please click the link in the email to complete your opt-out request.'
     })
+
+
+@election_admin()
+def unconfirmed_votes_list(request, election):
+  """
+  Vista para listar votos no confirmados.
+  """
+  from .models import UnconfirmedVote
+  votes = UnconfirmedVote.objects.all().order_by('-cast_at')
+  return render_template(request, 'unconfirmed_votes_list', {'election': election, 'votes': votes})
 
 
 @require_http_methods(["GET"])
