@@ -642,7 +642,7 @@ def one_election_cast_confirm(request, election):
   vote_fingerprint = cryptoutils.hash_b64(encrypted_vote)
 
   # Guardar voto no confirmado
-  if !UnconfirmedVote.objects.filter(vote_hash=vote_fingerprint).exists():
+  if not UnconfirmedVote.objects.filter(vote_hash=vote_fingerprint).exists():
       unconfirmed_vote = UnconfirmedVote(vote_hash=vote_fingerprint)
       unconfirmed_vote.save()
 
