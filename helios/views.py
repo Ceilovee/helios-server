@@ -534,7 +534,6 @@ def one_election_cast(request, election):
   """
   on a GET, this is a cancellation, on a POST it's a cast
   """
-  logging.info("Entering one_election_cast")
   if request.method == "GET":
     return HttpResponseRedirect(settings.SECURE_URL_HOST + reverse(url_names.election.ELECTION_VIEW, args = [election.uuid]))
     
@@ -618,7 +617,6 @@ def password_voter_login(request, election):
 @election_view()
 def one_election_cast_confirm(request, election):
   user = get_user(request)    
-  logging.info("Entering one_election_cast_confirm")
 
   # if no encrypted vote, the user is reloading this page or otherwise getting here in a bad way
   if ('encrypted_vote' not in request.session) or request.session['encrypted_vote'] is None:
@@ -785,7 +783,6 @@ def one_election_cast_done(request, election):
   """
   user = get_user(request)
   voter = get_voter(request, user, election)
-  logging.info("Entering one_election_cast_done")
 
   if voter:
     votes = CastVote.get_by_voter(voter)

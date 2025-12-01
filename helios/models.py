@@ -10,7 +10,6 @@ import copy
 import csv
 import datetime
 import uuid
-import logging
 
 import bleach
 from django.conf import settings
@@ -1051,7 +1050,6 @@ class Voter(HeliosModel):
     self.voter_password = utils.random_string(length, alphabet='abcdefghjkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789')
 
   def store_vote(self, cast_vote):
-    logging.info(f"Entering Voter.store_vote for voter={self.uuid} cast_vote_id={getattr(cast_vote, 'id', None)}")
     # only store the vote if it's cast later than the current one
     if self.cast_at and cast_vote.cast_at < self.cast_at:
       return
@@ -1142,7 +1140,6 @@ class CastVote(HeliosModel):
     return cls.objects.filter(voter = voter).order_by('-cast_at')
 
   def verify_and_store(self):
-    logging.info(f"Entering CastVote.verify_and_store for cast_vote id={getattr(self, 'id', None)} voter={getattr(self.voter, 'uuid', None)}")
     # if it's quarantined, don't let this go through
     if self.is_quarantined:
       raise Exception("cast vote is quarantined, verification and storage is delayed.")
