@@ -31,6 +31,30 @@ class HeliosModel(models.Model, datatypes.LDObjectContainer):
   class Meta:
     abstract = True
 
+class UnconfirmedVote(models.Model):
+    """
+    A vote that has been received but not yet confirmed.
+    """
+    id = models.AutoField(primary_key=True)
+    # unique also creates the index on the hash
+    vote_hash = models.CharField(max_length=100, unique=True)
+    # reception time, in UTC; unlike auto_now_add, an assigned value is kept
+    cast_at = models.DateTimeField(default=datetime.datetime.utcnow)
+
+    class Meta:
+        app_label = 'helios'
+
+    @classmethod
+    def register(cls, vote_hash):
+        """
+        Record the reception time the first time this hash is seen and always
+        return the same row. get_or_create handles the race between concurrent
+        requests by relying on the unique constraint.
+        """
+        unconfirmed_vote, _ = cls.objects.get_or_create(vote_hash=vote_hash)
+        return unconfirmed_vote
+
+
 class Election(HeliosModel):
   admin = models.ForeignKey(User, on_delete=models.CASCADE)
 
@@ -1041,7 +1065,8 @@ class CastVote(HeliosModel):
   # a tiny version of the hash to enable short URLs
   vote_tinyhash = models.CharField(max_length=50, null=True, unique=True)
 
-  cast_at = models.DateTimeField(auto_now_add=True)
+  # time the vote was received (see UnconfirmedVote), not when it was confirmed
+  cast_at = models.DateTimeField(default=datetime.datetime.utcnow)
 
   # some ballots can be quarantined (this is not the same thing as provisional)
   quarantined_p = models.BooleanField(default=False, null=False)

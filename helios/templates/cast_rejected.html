@@ -1,0 +1,19 @@
+{% extends TEMPLATE_BASE %}
+{% block title %}Vote Rejected{% endblock %}
+
+{% block content %}
+<h1>{{election.name}} &mdash; Vote Rejected</h1>
+
+<p>
+  Your ballot was <b>not</b> recorded: it was received before the ballot already on file for you,
+  so that ballot remains the valid one.
+</p>
+<p>
+  If you want to change your vote, vote again.
+</p>
+
+<p style="font-size: 1.4em;">
+[ <a href="{% url "election@view" election.uuid %}">return to election info</a> ]
+</p>
+
+{% endblock %}
