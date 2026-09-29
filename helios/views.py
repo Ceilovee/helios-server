@@ -639,10 +639,8 @@ def one_election_cast_confirm(request, election):
   encrypted_vote = request.session['encrypted_vote']
   vote_fingerprint = cryptoutils.hash_b64(encrypted_vote)
 
-  # Guardar voto no confirmado
-  if not UnconfirmedVote.objects.filter(vote_hash=vote_fingerprint).exists():
-      unconfirmed_vote = UnconfirmedVote(vote_hash=vote_fingerprint)
-      unconfirmed_vote.save()
+  # record the reception time the first time this vote is seen
+  unconfirmed_vote = UnconfirmedVote.register(vote_fingerprint)
 
   # if this user is a voter, prepare some stuff
   if voter:
@@ -657,21 +655,12 @@ def one_election_cast_confirm(request, election):
     else:
       cast_ip = request.META.get('REMOTE_ADDR', None)
 
-    # prepare the vote to cast
-
-    # Obtener el cast_at real desde UnconfirmedVote
-    unconfirmed = None
-    try:
-        unconfirmed = UnconfirmedVote.objects.get(vote_hash=vote_fingerprint)
-    except UnconfirmedVote.DoesNotExist:
-        pass
-    real_cast_at = unconfirmed.cast_at if unconfirmed else cast_at
-
+    # prepare the vote to cast, stamped with its reception time
     cast_vote_params = {
       'vote' : vote,
       'voter' : voter,
       'vote_hash': vote_fingerprint,
-      'cast_at': real_cast_at,
+      'cast_at': unconfirmed_vote.cast_at,
       'cast_ip': cast_ip
     }
 
@@ -745,16 +734,12 @@ def one_election_cast_confirm(request, election):
       return HttpResponseRedirect(settings.SECURE_URL_HOST + reverse(one_election_cast_confirm, args=[election.uuid]))
     
     # don't store the vote in the voter's data structure until verification
-    # if the voter already has a cast_at, ensure this new vote is newer
-    try:
-      # Usar el cast_at real para la comparación
-      if voter.cast_at and cast_vote.cast_at <= voter.cast_at:
-        # incoming vote is older or same as already recorded vote — don't accept
-        # redirect back to confirmation page with a flag so the UI can show a message
-        return HttpResponseRedirect(settings.SECURE_URL_HOST + reverse(one_election_cast_confirm, args=[election.uuid]) + "?older_timestamp=1")
-    except Exception:
-      # on any comparison error, fall back to saving
-      pass
+    # if the voter already has a cast_at, ensure this new vote was received later.
+    # No try/except: if the comparison fails, the request fails and nothing is saved.
+    if voter.cast_at and cast_vote.cast_at <= voter.cast_at:
+      # discard the pending vote so it can't be retried, and tell the voter why
+      del request.session['encrypted_vote']
+      return HttpResponseRedirect(settings.SECURE_URL_HOST + reverse(one_election_cast_rejected, args=[election.uuid]))
 
     cast_vote.save()
 
@@ -809,6 +794,14 @@ def one_election_cast_done(request, election):
   return render_template(request, 'cast_done', {'election': election,
                                                 'vote_hash': vote_hash, 'logout': logout},
                          include_user=(not logout))
+
+@election_view()
+def one_election_cast_rejected(request, election):
+  """
+  Shown when a ballot is rejected because it was received before
+  the ballot already recorded for this voter.
+  """
+  return render_template(request, 'cast_rejected', {'election': election})
 
 @election_view()
 @return_json
@@ -1680,16 +1673,6 @@ def optout_success(request):
         'title': 'Opt-Out Confirmation Sent',
         'message': 'We have sent you a confirmation email. Please click the link in the email to complete your opt-out request.'
     })
-
-
-@election_admin()
-def unconfirmed_votes_list(request, election):
-  """
-  Vista para listar votos no confirmados.
-  """
-  from .models import UnconfirmedVote
-  votes = UnconfirmedVote.objects.all().order_by('-cast_at')
-  return render_template(request, 'unconfirmed_votes_list', {'election': election, 'votes': votes})
 
 
 @require_http_methods(["GET"])

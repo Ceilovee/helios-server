@@ -33,39 +33,28 @@ class HeliosModel(models.Model, datatypes.LDObjectContainer):
 
 class UnconfirmedVote(models.Model):
     """
-    Voto recibido pero no confirmado.
+    A vote that has been received but not yet confirmed.
     """
     id = models.AutoField(primary_key=True)
-    vote_hash = models.CharField(max_length=100)
-    vote_tinyhash = models.CharField(max_length=50, null=True, unique=True)
-    cast_at = models.DateTimeField(auto_now_add=True)
+    # unique also creates the index on the hash
+    vote_hash = models.CharField(max_length=100, unique=True)
+    # reception time, in UTC; unlike auto_now_add, an assigned value is kept
+    cast_at = models.DateTimeField(default=datetime.datetime.utcnow)
 
     class Meta:
         app_label = 'helios'
 
-    def set_tinyhash(self):
+    @classmethod
+    def register(cls, vote_hash):
         """
-        find a tiny version of the hash for a URL slug.
+        Record the reception time the first time this hash is seen and always
+        return the same row. get_or_create handles the race between concurrent
+        requests by relying on the unique constraint.
         """
-        safe_hash = self.vote_hash.decode() if isinstance(self.vote_hash, bytes) else self.vote_hash
-        for c in ['/', '+', '#']:
-            safe_hash = safe_hash.replace(c, '')
+        unconfirmed_vote, _ = cls.objects.get_or_create(vote_hash=vote_hash)
+        return unconfirmed_vote
 
-        length = 8
-        while True:
-          vote_tinyhash = safe_hash[:length]
-          if CastVote.objects.filter(vote_tinyhash = vote_tinyhash).count() == 0:
-              break
-          length += 1
 
-        self.vote_tinyhash = vote_tinyhash
-
-    def save(self, *args, **kwargs):
-        if not self.vote_tinyhash:
-          self.set_tinyhash()
-          self.cast_at = datetime.datetime.utcnow()
-        super(UnconfirmedVote, self).save(*args, **kwargs)
-        
 class Election(HeliosModel):
   admin = models.ForeignKey(User, on_delete=models.CASCADE)
 
@@ -1076,7 +1065,8 @@ class CastVote(HeliosModel):
   # a tiny version of the hash to enable short URLs
   vote_tinyhash = models.CharField(max_length=50, null=True, unique=True)
 
-  cast_at = models.DateTimeField(auto_now_add=True)
+  # time the vote was received (see UnconfirmedVote), not when it was confirmed
+  cast_at = models.DateTimeField(default=datetime.datetime.utcnow)
 
   # some ballots can be quarantined (this is not the same thing as provisional)
   quarantined_p = models.BooleanField(default=False, null=False)
