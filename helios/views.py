@@ -29,7 +29,7 @@ from . import forms
 from . import tasks
 from .crypto import algs, electionalgs, elgamal
 from .crypto import utils as cryptoutils
-from .models import User, Election, CastVote, Voter, VoterFile, Trustee, AuditedBallot
+from .models import User, Election, CastVote, Voter, VoterFile, Trustee, AuditedBallot, UnconfirmedVote
 from .security import (election_view, election_admin,
                        trustee_check, set_logged_in_trustee,
                        can_create_election, user_can_see_election, get_voter,
@@ -639,6 +639,9 @@ def one_election_cast_confirm(request, election):
   encrypted_vote = request.session['encrypted_vote']
   vote_fingerprint = cryptoutils.hash_b64(encrypted_vote)
 
+  # record the reception time the first time this vote is seen
+  unconfirmed_vote = UnconfirmedVote.register(vote_fingerprint)
+
   # if this user is a voter, prepare some stuff
   if voter:
     vote = datatypes.LDObject.fromDict(utils.from_json(encrypted_vote), type_hint='legacy/EncryptedVote').wrapped_obj
@@ -652,12 +655,12 @@ def one_election_cast_confirm(request, election):
     else:
       cast_ip = request.META.get('REMOTE_ADDR', None)
 
-    # prepare the vote to cast
+    # prepare the vote to cast, stamped with its reception time
     cast_vote_params = {
       'vote' : vote,
       'voter' : voter,
       'vote_hash': vote_fingerprint,
-      'cast_at': datetime.datetime.utcnow(),
+      'cast_at': unconfirmed_vote.cast_at,
       'cast_ip': cast_ip
     }
 
@@ -731,6 +734,13 @@ def one_election_cast_confirm(request, election):
       return HttpResponseRedirect(settings.SECURE_URL_HOST + reverse(one_election_cast_confirm, args=[election.uuid]))
     
     # don't store the vote in the voter's data structure until verification
+    # if the voter already has a cast_at, ensure this new vote was received later.
+    # No try/except: if the comparison fails, the request fails and nothing is saved.
+    if voter.cast_at and cast_vote.cast_at <= voter.cast_at:
+      # discard the pending vote so it can't be retried, and tell the voter why
+      del request.session['encrypted_vote']
+      return HttpResponseRedirect(settings.SECURE_URL_HOST + reverse(one_election_cast_rejected, args=[election.uuid]))
+
     cast_vote.save()
 
     # status update?
@@ -783,6 +793,26 @@ def one_election_cast_done(request, election):
   # include_user is set to False if logout is happening
   return render_template(request, 'cast_done', {'election': election,
                                                 'vote_hash': vote_hash, 'logout': logout},
+                         include_user=(not logout))
+
+@election_view()
+def one_election_cast_rejected(request, election):
+  """
+  Shown when a ballot is rejected because it was received before
+  the ballot already recorded for this voter.
+  """
+  user = get_user(request)
+  voter = get_voter(request, user, election)
+
+  # same logout as one_election_cast_done: a rejection must not leave the session open
+  logout = False
+  if voter:
+    if voter.user == user and voter.user is not None:
+      logout = settings.LOGOUT_ON_CONFIRMATION
+    else:
+      del request.session['CURRENT_VOTER_ID']
+
+  return render_template(request, 'cast_rejected', {'election': election, 'logout': logout},
                          include_user=(not logout))
 
 @election_view()
