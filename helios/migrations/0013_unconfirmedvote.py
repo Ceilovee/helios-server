@@ -8,7 +8,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('helios', '0006_emailoptout'),
+        ('helios', '0012_site_announcement'),
     ]
 
     operations = [
