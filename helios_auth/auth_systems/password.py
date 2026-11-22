@@ -10,6 +10,7 @@ from django.http import HttpResponseRedirect
 from django.urls import re_path
 
 from helios_auth import url_names
+from helios_auth.utils import format_recipient, same_site_path
 
 import logging
 
@@ -20,10 +21,13 @@ PASSWORD_FORGOTTEN_URL_NAME = "auth@password@forgotten"
 
 def create_user(username, password, name = None):
   from helios_auth.models import User
-  
-  user = User.get_by_type_and_id('password', username)
-  if user:
-    raise Exception('user exists')
+
+  try:
+    User.get_by_type_and_id('password', username)
+  except User.DoesNotExist:
+    pass
+  else:
+    raise ValueError(f"user '{username}' already exists")
   
   info = {'password' : password, 'name': name}
   user = User.update_or_create(user_type='password', user_id=username, info = info)
@@ -41,19 +45,22 @@ def password_login_view(request):
   from helios_auth.view_utils import render_template
   from helios_auth.views import after
   from helios_auth.models import User
+  from helios_auth.security import check_csrf
 
   error = None
-  
+
   if request.method == "GET":
     form = LoginForm()
   else:
+    check_csrf(request)
+
     form = LoginForm(request.POST)
 
     # set this in case we came here straight from the multi-login chooser
     # and thus did not have a chance to hit the "start/password" URL
     request.session['auth_system_name'] = 'password'
     if 'return_url' in request.POST:
-      request.session['auth_return_url'] = request.POST.get('return_url')
+      request.session['auth_return_url'] = same_site_path(request.POST.get('return_url'))
 
     if form.is_valid():
       username = form.cleaned_data['username'].strip()
@@ -76,12 +83,15 @@ def password_forgotten_view(request):
   """
   from helios_auth.view_utils import render_template
   from helios_auth.models import User
+  from helios_auth.security import check_csrf
 
   if request.method == "GET":
     return render_template(request, 'password/forgot', {'return_url': request.GET.get('return_url', '')})
   else:
+    check_csrf(request)
+
     username = request.POST['username']
-    return_url = request.POST['return_url']
+    return_url = same_site_path(request.POST.get('return_url'))
     
     try:
       user = User.get_by_type_and_id('password', username)
@@ -100,7 +110,7 @@ Your password: %s
 """ % (user.user_id, user.info['password'], settings.SITE_TITLE)
 
     # FIXME: make this a task
-    send_mail('password reminder', body, settings.SERVER_EMAIL, ["%s <%s>" % (user.info['name'], user.info['email'])], fail_silently=False)
+    send_mail('password reminder', body, settings.SERVER_EMAIL, [format_recipient(user.info['name'], user.info['email'])], fail_silently=False)
     
     return HttpResponseRedirect(return_url)
   
@@ -120,7 +130,7 @@ def update_status(token, message):
 def send_message(user_id, user_name, user_info, subject, body):
   email = user_id
   name = user_name or email
-  send_mail(subject, body, settings.SERVER_EMAIL, ["\"%s\" <%s>" % (name, email)], fail_silently=False)    
+  send_mail(subject, body, settings.SERVER_EMAIL, [format_recipient(name, email)], fail_silently=False)    
 
 
 #

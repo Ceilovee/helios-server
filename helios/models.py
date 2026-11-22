@@ -6,14 +6,15 @@ Ben Adida
 (ben@adida.net)
 """
 
-import copy
+import codecs
 import csv
 import datetime
 import uuid
 
-import bleach
+import nh3
 from django.conf import settings
 from django.db import models, transaction
+from django.utils.html import format_html, format_html_join
 from validate_email import validate_email
 
 from helios import datatypes
@@ -22,7 +23,7 @@ from helios.datatypes.djangofield import LDObjectField
 # useful stuff in helios_auth
 from helios_auth.jsonfield import JSONField
 from helios_auth.models import User, AUTH_SYSTEMS
-from .crypto import algs
+from .crypto import algs, electionalgs
 from .crypto.elgamal import Cryptosystem
 from .crypto.utils import random, hash_b64
 
@@ -54,9 +55,34 @@ class UnconfirmedVote(models.Model):
         unconfirmed_vote, _ = cls.objects.get_or_create(vote_hash=vote_hash)
         return unconfirmed_vote
 
+class ElectionManager(models.Manager):
+  """
+  Custom manager that filters out soft-deleted elections by default.
+  Use Election.objects_with_deleted.all() to include deleted elections.
+  """
+  def get_queryset(self):
+    return super().get_queryset().filter(deleted_at__isnull=True)
+
+class TallyDecryptionError(Exception):
+  """
+  Raised when the trustees' decryption factors don't decrypt the tally.
+  """
+  pass
+
+
+def result_is_complete(result):
+  """
+  True when result has a count for every answer. Answers whose decrypted
+  value isn't in the discrete-log table come back as None.
+  """
+  return bool(result) and all(count is not None for question in result for count in question)
+
 
 class Election(HeliosModel):
   admin = models.ForeignKey(User, on_delete=models.CASCADE)
+
+  # additional administrators with equal privileges to the creator
+  admins = models.ManyToManyField(User, related_name='elections_administered', blank=True)
 
   uuid = models.CharField(max_length=50, null=False)
 
@@ -98,7 +124,7 @@ class Election(HeliosModel):
   openreg = models.BooleanField(default=False)
 
   # featured election?
-  featured_p = models.BooleanField(default=False)
+  featured_p = models.BooleanField(default=False, db_index=True)
 
   # voter aliases?
   use_voter_aliases = models.BooleanField(default=False)
@@ -119,6 +145,9 @@ class Election(HeliosModel):
   # dates at which things happen for the election
   frozen_at = models.DateTimeField(auto_now_add=False, default=None, null=True)
   archived_at = models.DateTimeField(auto_now_add=False, default=None, null=True)
+
+  # soft delete timestamp - null means not deleted, non-null means deleted at that time
+  deleted_at = models.DateTimeField(auto_now_add=False, default=None, null=True, db_index=True)
 
   # dates for the election steps, as scheduled
   # these are always UTC
@@ -167,6 +196,10 @@ class Election(HeliosModel):
   # downloadable election info
   election_info_url = models.CharField(max_length=300, null=True)
 
+  # Custom managers
+  objects = ElectionManager()  # default manager excludes deleted elections
+  objects_with_deleted = models.Manager()  # includes all elections
+
   class Meta:
     app_label = 'helios'
 
@@ -187,6 +220,20 @@ class Election(HeliosModel):
   @property
   def num_cast_votes(self):
     return self.voter_set.exclude(vote=None).count()
+
+  @property
+  def num_pending_votes(self):
+    """
+    Count votes that have been cast but not yet verified or invalidated.
+    These are votes still waiting in the queue to be processed.
+    Excludes quarantined votes which are intentionally held.
+    """
+    return CastVote.objects.filter(
+      voter__election=self,
+      verified_at=None,
+      invalidated_at=None,
+      quarantined_p=False
+    ).count()
 
   @property
   def num_voters(self):
@@ -219,12 +266,18 @@ class Election(HeliosModel):
     return self.archived_at is not None
 
   @property
+  def is_deleted(self):
+    return self.deleted_at is not None
+
+  @property
   def description_bleached(self):
-    return bleach.clean(self.description,
-                        tags=list(bleach.ALLOWED_TAGS) + ['p', 'h4', 'h5', 'h3', 'h2', 'br', 'u'],
-                        strip=True,
-                        strip_comments=True,
-                        )
+    return nh3.clean(self.description,
+                     tags={'a', 'abbr', 'acronym', 'b', 'blockquote', 'code', 'em', 'i', 'li', 'ol', 'strong', 'ul',
+                           'p', 'h2', 'h3', 'h4', 'h5', 'br', 'u'},
+                     attributes={'a': {'href', 'title'}, 'abbr': {'title'}, 'acronym': {'title'}},
+                     url_schemes={'http', 'https', 'mailto'},
+                     link_rel=None,
+                     )
 
   @classmethod
   def get_featured(cls):
@@ -236,7 +289,9 @@ class Election(HeliosModel):
 
   @classmethod
   def get_by_user_as_admin(cls, user, archived_p=None, limit=None):
-    query = cls.objects.filter(admin = user)
+    from django.db.models import Q
+    # Include elections where user is the creator (admin) OR in the admins list
+    query = cls.objects.filter(Q(admin=user) | Q(admins=user)).distinct()
     if archived_p is True:
       query = query.exclude(archived_at= None)
     if archived_p is False:
@@ -261,16 +316,18 @@ class Election(HeliosModel):
       return query
 
   @classmethod
-  def get_by_uuid(cls, uuid):
+  def get_by_uuid(cls, uuid, include_deleted=False):
     try:
-      return cls.objects.select_related().get(uuid=uuid)
+      manager = cls.objects_with_deleted if include_deleted else cls.objects
+      return manager.select_related().get(uuid=uuid)
     except cls.DoesNotExist:
       return None
 
   @classmethod
-  def get_by_short_name(cls, short_name):
+  def get_by_short_name(cls, short_name, include_deleted=False):
     try:
-      return cls.objects.get(short_name=short_name)
+      manager = cls.objects_with_deleted if include_deleted else cls.objects
+      return manager.get(short_name=short_name)
     except cls.DoesNotExist:
       return None
 
@@ -297,11 +354,18 @@ class Election(HeliosModel):
     """
     voter_file_content_bytes = uploaded_file.read()
 
-    # usually it's utf-8 encoded, but occasionally it's latin-1
-    try:
-      voter_file_content = voter_file_content_bytes.decode('utf-8')
-    except:
-      voter_file_content = voter_file_content_bytes.decode('latin-1')
+    # usually it's utf-8 encoded (maybe with a BOM), sometimes UTF-16 (Excel's
+    # "Unicode" export), and occasionally latin-1
+    if voter_file_content_bytes.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+      voter_file_content = voter_file_content_bytes.decode('utf-16')
+    else:
+      try:
+        voter_file_content = voter_file_content_bytes.decode('utf-8-sig')
+      except UnicodeDecodeError:
+        voter_file_content = voter_file_content_bytes.decode('latin-1')
+
+    # Postgres can't store NUL characters in a text field, and they never belong in a CSV
+    voter_file_content = voter_file_content.replace('\x00', '')
 
     new_voter_file = VoterFile(election = self, voter_file_content = voter_file_content)
     new_voter_file.save()
@@ -355,18 +419,16 @@ class Election(HeliosModel):
     if not self.eligibility:
       return "Anyone can vote."
     else:
-      return_val = "<ul>"
+      items = []
 
       for constraint in self.eligibility:
         if 'constraint' in constraint:
           for one_constraint in constraint['constraint']:
-            return_val += "<li>%s</li>" % AUTH_SYSTEMS[constraint['auth_system']].pretty_eligibility(one_constraint)
+            items.append((AUTH_SYSTEMS[constraint['auth_system']].pretty_eligibility(one_constraint),))
         else:
-          return_val += "<li> any %s user</li>" % constraint['auth_system']
+          items.append((" any %s user" % constraint['auth_system'],))
 
-      return_val += "</ul>"
-
-      return return_val
+      return format_html("<ul>{}</ul>", format_html_join("", "<li>{}</li>", items))
 
   @property
   def voting_start_at(self):
@@ -429,6 +491,41 @@ class Election(HeliosModel):
 
     return issues
 
+  def can_send_voter_emails(self):
+    """
+    Check if voter emails can be sent for this election.
+    Returns a tuple: (can_send: bool, reason: str|None)
+
+    If can_send is True, reason will be None.
+    If can_send is False, reason will explain why emails are disabled.
+    """
+    # Check if election was tallied more than configured weeks ago
+    if self.tallying_finished_at:
+      cutoff_date = datetime.datetime.utcnow() - datetime.timedelta(weeks=settings.HELIOS_VOTER_EMAIL_CUTOFF_WEEKS)
+      if self.tallying_finished_at < cutoff_date:
+        weeks = settings.HELIOS_VOTER_EMAIL_CUTOFF_WEEKS
+        return (False, f"Election was tallied more than {weeks} week{'s' if weeks != 1 else ''} ago")
+
+    # Add more reasons here in the future
+
+    return (True, None)
+
+  def can_modify_voters(self):
+    """
+    Check if voter modifications (uploads, deletions) are allowed for this election.
+    Returns a tuple: (allowed: bool, reason: str|None)
+
+    Voter modifications are blocked once tallying has started,
+    as changing voters after vote counting would compromise election integrity.
+    """
+    if self.encrypted_tally:
+      return (False, "Election has been tallied")
+
+    if self.tallying_started_at:
+      return (False, "Tallying has started")
+
+    return (True, None)
+
   def ready_for_tallying(self):
     return datetime.datetime.utcnow() >= self.tallying_starts_at
 
@@ -460,7 +557,7 @@ class Election(HeliosModel):
     """
     release the result that should already be computed
     """
-    if not self.result:
+    if not self.has_complete_result:
       return
 
     self.result_released_at = datetime.datetime.utcnow()
@@ -474,7 +571,14 @@ class Election(HeliosModel):
     trustees = Trustee.get_by_election(self)
     decryption_factors = [t.decryption_factors for t in trustees]
 
-    self.result = self.encrypted_tally.decrypt_from_factors(decryption_factors, self.public_key)
+    result = self.encrypted_tally.decrypt_from_factors(decryption_factors, self.public_key)
+
+    # a count the discrete-log table can't find comes back as None: the
+    # combined factors don't decrypt the tally, so there is no result to keep
+    if not result_is_complete(result):
+      raise TallyDecryptionError("the trustees' decryption factors do not decrypt the tally")
+
+    self.result = result
 
     self.append_log(ElectionLog.DECRYPTIONS_COMBINED)
 
@@ -503,46 +607,25 @@ class Election(HeliosModel):
     ## FIXME
     return 0
 
-  def set_eligibility(self):
+  def voter_auth_systems(self):
     """
-    if registration is closed and eligibility has not been
-    already set, then this call sets the eligibility criteria
-    based on the actual list of voters who are already there.
-
-    This helps ensure that the login box shows the proper options.
-
-    If registration is open but no voters have been added with password,
-    then that option is also canceled out to prevent confusion, since
-    those elections usually just use the existing login systems.
+    The auth systems this election's voters can log in with, in AUTH_ENABLED_SYSTEMS
+    order. Computed from the current voter list rather than stored at freeze time,
+    since voters can still be added after the election is frozen.
     """
+    systems = set(self.voter_set.exclude(user=None).values_list('user__user_type', flat=True))
+    if self.voter_set.filter(user=None).exists():
+      systems.add('password')
 
-    # don't override existing eligibility
-    if self.eligibility is not None:
-      return
+    # open registration: whoever the eligibility rules admit can also log in and
+    # register, except with password, which can't self-register
+    if self.openreg:
+      if self.eligibility:
+        systems.update(e['auth_system'] for e in self.eligibility if e['auth_system'] != 'password')
+      else:
+        systems.update(s for s in settings.AUTH_ENABLED_SYSTEMS if s != 'password')
 
-    # enable this ONLY once the cast_confirm screen makes sense
-    #if self.voter_set.count() == 0:
-    #  return
-
-    auth_systems = copy.copy(settings.AUTH_ENABLED_SYSTEMS)
-    voter_types = [r['user__user_type'] for r in self.voter_set.values('user__user_type').distinct() if
-                   r['user__user_type'] is not None]
-
-    # password is now separate, not an explicit voter type
-    if self.voter_set.filter(user=None).count() > 0:
-      voter_types.append('password')
-    else:
-      # no password users, remove password from the possible auth systems
-      if 'password' in auth_systems:
-        auth_systems.remove('password')
-
-    # closed registration: limit the auth_systems to just the ones
-    # that have registered voters
-    if not self.openreg:
-      auth_systems = [vt for vt in voter_types if vt in auth_systems]
-
-    self.eligibility = [{'auth_system': auth_system} for auth_system in auth_systems]
-    self.save()
+    return [s for s in settings.AUTH_ENABLED_SYSTEMS if s in systems]
 
   def freeze(self):
     """
@@ -551,24 +634,44 @@ class Election(HeliosModel):
     if len(self.issues_before_freeze) > 0:
       raise Exception("cannot freeze an election that has issues")
 
-    self.frozen_at = datetime.datetime.utcnow()
+    with transaction.atomic():
+      # hold the election row while reading the trustees' keys, so a trustee
+      # key upload (which takes the same lock) can't land in between
+      Election.objects.select_for_update().filter(pk=self.pk).first()
 
-    # voters hash
-    self.generate_voters_hash()
+      self.frozen_at = datetime.datetime.utcnow()
 
-    self.set_eligibility()
+      # voters hash
+      self.generate_voters_hash()
 
-    # public key for trustees
-    trustees = list(Trustee.get_by_election(self))
-    combined_pk = trustees[0].public_key
-    for t in trustees[1:]:
-      combined_pk = combined_pk * t.public_key
+      # public key for trustees
+      trustees = list(Trustee.get_by_election(self))
+      combined_pk = trustees[0].public_key
+      for t in trustees[1:]:
+        combined_pk = combined_pk * t.public_key
 
-    self.public_key = combined_pk
+      self.public_key = combined_pk
 
-    # log it
-    self.append_log(ElectionLog.FROZEN)
+      # log it
+      self.append_log(ElectionLog.FROZEN)
 
+      self.save()
+
+  def soft_delete(self):
+    """
+    Soft delete the election by setting deleted_at timestamp.
+    The election will be hidden from default queries.
+    """
+    self.deleted_at = datetime.datetime.utcnow()
+    self.append_log(ElectionLog.DELETED)
+    self.save()
+
+  def undelete(self):
+    """
+    Restore a soft-deleted election by clearing deleted_at.
+    """
+    self.deleted_at = None
+    self.append_log(ElectionLog.UNDELETED)
     self.save()
 
   def generate_trustee(self, params):
@@ -646,26 +749,7 @@ class Election(HeliosModel):
     """
     determining the winner for one question
     """
-    # sort the answers , keep track of the index
-    counts = sorted(enumerate(result), key=lambda x: x[1])
-    counts.reverse()
-
-    the_max = question['max'] or 1
-    the_min = question['min'] or 0
-
-    # if there's a max > 1, we assume that the top MAX win
-    if the_max > 1:
-      return [c[0] for c in counts[:the_max]]
-
-    # if max = 1, then depends on absolute or relative
-    if question['result_type'] == 'absolute':
-      if counts[0][1] >=  (num_cast_votes/2 + 1):
-        return [counts[0][0]]
-      else:
-        return []
-    else:
-      # assumes that anything non-absolute is relative
-      return [counts[0][0]]
+    return electionalgs.one_question_winner(question, result, num_cast_votes)
 
   @property
   def winners(self):
@@ -677,12 +761,13 @@ class Election(HeliosModel):
     return [self.one_question_winner(self.questions[i], self.result[i], self.num_cast_votes) for i in range(len(self.questions))]
 
   @property
-  def pretty_result(self):
-    if not self.result:
-      return None
+  def has_complete_result(self):
+    return result_is_complete(self.result)
 
-    # get the winners
-    winners = self.winners
+  @property
+  def pretty_result(self):
+    if not self.has_complete_result:
+      return None
 
     raw_result = self.result
     prettified_result = []
@@ -690,15 +775,21 @@ class Election(HeliosModel):
     # loop through questions
     for i in range(len(self.questions)):
       q = self.questions[i]
+      winners, tied = electionalgs.one_question_result(q, raw_result[i], self.num_cast_votes)
       pretty_question = []
 
       # go through answers
       for j in range(len(q['answers'])):
         a = q['answers'][j]
         count = raw_result[i][j]
-        pretty_question.append({'answer': a, 'count': count, 'winner': (j in winners[i])})
+        pretty_question.append({'answer': a, 'count': count, 'winner': (j in winners), 'tied': (j in tied)})
 
-      prettified_result.append({'question': q['short_name'], 'answers': pretty_question})
+      prettified_result.append({
+        'question': q['short_name'],
+        'answers': pretty_question,
+        # seats left open because of a tie for the last one(s)
+        'unfilled_seats': (q['max'] or 1) - len(winners) if tied else 0,
+      })
 
     return prettified_result
 
@@ -711,6 +802,8 @@ class ElectionLog(models.Model):
   FROZEN = "frozen"
   VOTER_FILE_ADDED = "voter file added"
   DECRYPTIONS_COMBINED = "decryptions combined"
+  DELETED = "deleted"
+  UNDELETED = "undeleted"
 
   election = models.ForeignKey(Election, on_delete=models.CASCADE)
   log = models.CharField(max_length=500)
@@ -718,6 +811,9 @@ class ElectionLog(models.Model):
 
   class Meta:
     app_label = 'helios'
+    indexes = [
+      models.Index(fields=['election', 'at'], name='helios_eleclog_elec_at_idx'),
+    ]
 
 
 class VoterFile(models.Model):
@@ -757,10 +853,16 @@ class VoterFile(models.Model):
       # this should leave us with only \n
       # We then split the contents by line
       content = content.replace('\r', '\n').replace('\n\n', '\n').split('\n')
+
+      # Excel's "Unicode Text" export is tab-separated: use tabs if the first
+      # line starts with a voter type followed by a tab
+      first_line = next((line for line in content if line.strip()), '')
+      delimiter = '\t' if first_line.split('\t')[0].strip() in AUTH_SYSTEMS else ','
     else:
       content = open(self.voter_file.path, encoding='utf-8', newline='')
+      delimiter = ','
 
-    reader = csv.reader(content, delimiter=',')
+    reader = csv.reader(content, delimiter=delimiter)
 
     for voter_fields in reader:
       # bad line
@@ -829,13 +931,22 @@ class VoterFile(models.Model):
           new_voter.generate_password()
           election=self.election
           if election.use_voter_aliases:
-              utils.lock_row(Election, election.id)
-              alias_num = election.last_alias_num + 1
-              new_voter.alias = "V%s" % alias_num
-          new_voter.save()
+              # Use transaction to ensure alias assignment is atomic
+              with transaction.atomic():
+                  utils.lock_row(Election, election.id)
+                  alias_num = election.last_alias_num + 1
+                  new_voter.alias = "V%s" % alias_num
+                  new_voter.save()
+          else:
+              new_voter.save()
           successful_voters += 1
       else:
-          user, _ = User.objects.get_or_create(user_type=voter['voter_type'], user_id=voter['voter_id'], defaults = {'name': voter['voter_id'], 'info': {}, 'token': None})
+          # match existing users the same way login does (case-insensitive for e.g. GitHub),
+          # so an upload never creates a case-only duplicate of an existing user
+          try:
+            user = User.get_by_type_and_id(voter['voter_type'], voter['voter_id'])
+          except User.DoesNotExist:
+            user, _ = User.objects.get_or_create(user_type=voter['voter_type'], user_id=voter['voter_id'], defaults = {'name': voter['voter_id'], 'info': {}, 'token': None})
           existing_voter = Voter.get_by_election_and_user(self.election, user)
           if not existing_voter:
               Voter.register_user_in_election(user, self.election)
@@ -844,8 +955,12 @@ class VoterFile(models.Model):
     # Notify admin if there were opted-out voters
     if opted_out_voters:
         from . import tasks
-        tasks.notify_admin_opted_out_voters.delay(self.election.id, opted_out_voters)
+        tasks.notify_admin_opted_out_voters.enqueue(self.election.id, opted_out_voters)
 
+    # report the voters actually added: rows for voters already on the list, or
+    # who opted out of Helios emails, are skipped and shouldn't be counted as loaded
+    self.num_voters = successful_voters
+    self.num_skipped = len(voters) - successful_voters
     self.processing_finished_at = datetime.datetime.utcnow()
     self.save()
 
@@ -860,7 +975,7 @@ class Voter(HeliosModel):
   #voter_type = models.CharField(max_length = 100)
   #voter_id = models.CharField(max_length = 100)
 
-  uuid = models.CharField(max_length = 50)
+  uuid = models.CharField(max_length=50, db_index=True)
 
   # for users of type password, no user object is created
   # but a dynamic user object is created automatically
@@ -901,6 +1016,11 @@ class Voter(HeliosModel):
 
     voter_uuid = str(uuid.uuid4())
     voter = Voter(uuid= voter_uuid, user = user, election = election)
+
+    # Set voter_login_id and voter_email from user object for consistent lookups
+    if user:
+        voter.voter_login_id = user.user_id
+        voter.voter_email = user.info.get('email') or user.user_id
 
     # do we need to generate an alias?
     if election.use_voter_aliases:
@@ -1060,7 +1180,7 @@ class CastVote(HeliosModel):
   vote = LDObjectField(type_hint = 'legacy/EncryptedVote')
 
   # cache the hash of the vote
-  vote_hash = models.CharField(max_length=100)
+  vote_hash = models.CharField(max_length=100, db_index=True)
 
   # a tiny version of the hash to enable short URLs
   vote_tinyhash = models.CharField(max_length=50, null=True, unique=True)
@@ -1080,7 +1200,11 @@ class CastVote(HeliosModel):
   cast_ip = models.GenericIPAddressField(null=True)
 
   class Meta:
-      app_label = 'helios'
+    app_label = 'helios'
+    indexes = [
+      models.Index(fields=['verified_at', 'invalidated_at'], name='helios_cv_verified_invld_idx'),
+      models.Index(fields=['cast_at'], name='helios_cv_cast_at_idx'),
+    ]
 
   @property
   def datatype(self):
@@ -1172,6 +1296,9 @@ class AuditedBallot(models.Model):
 
   class Meta:
     app_label = 'helios'
+    indexes = [
+      models.Index(fields=['election', 'vote_hash'], name='helios_ab_elec_hash_idx'),
+    ]
 
   @classmethod
   def get(cls, election, vote_hash):
@@ -1194,7 +1321,7 @@ class AuditedBallot(models.Model):
 class Trustee(HeliosModel):
   election = models.ForeignKey(Election, on_delete=models.CASCADE)
 
-  uuid = models.CharField(max_length=50)
+  uuid = models.CharField(max_length=50, db_index=True)
   name = models.CharField(max_length=200)
   email = models.EmailField()
   secret = models.CharField(max_length=100)
@@ -1320,3 +1447,21 @@ class EmailOptOut(models.Model):
       
     deleted_count, _ = cls.objects.filter(email_hash=email_hash).delete()
     return deleted_count > 0
+
+
+class SiteAnnouncement(models.Model):
+  """A single banner message shown on every page, set from the site admin page."""
+  text = models.TextField(blank=True)
+  updated_at = models.DateTimeField(auto_now=True)
+
+  class Meta:
+    app_label = 'helios'
+
+  @classmethod
+  def current_text(cls):
+    announcement = cls.objects.filter(pk=1).first()
+    return announcement.text if announcement else ''
+
+  @classmethod
+  def set_text(cls, text):
+    cls.objects.update_or_create(pk=1, defaults={'text': text})

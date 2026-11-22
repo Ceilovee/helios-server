@@ -1,4 +1,5 @@
 {% extends TEMPLATE_BASE %}
+{% load timezone_tags %}
 
 {% block title %}Voters &amp; Ballot Tracking Center for {{election.name}}{% endblock %}
 {% block content %}
@@ -36,7 +37,13 @@
 {% endif %}
 
 {% if email_voters and election.frozen_at and admin_p %}
-<p><a class="button" href="{% url "election@voters@email" election.uuid %}">email voters</a></p>
+<p>
+{% if can_send_emails %}
+<a class="button" href="{% url "election@voters@email" election.uuid %}">email voters</a>
+{% else %}
+<button class="button" disabled style="opacity: 0.5; cursor: not-allowed;" title="{{email_disabled_reason}}">email voters (disabled: {{email_disabled_reason}})</button>
+{% endif %}
+</p>
 {% endif %}
 
 {% if election.num_voters > 20 %}
@@ -57,7 +64,11 @@
 <!-- Add a Voter: WORK HERE-->
 {% if upload_p and not election.openreg %}
 <p>
+{% if can_modify_voters %}
 <a class="button" href="{% url "election@voters@upload" election_uuid=election.uuid %}">bulk upload voters</a>
+{% else %}
+<button class="button" disabled style="opacity: 0.5; cursor: not-allowed;" title="{{modify_voters_disabled_reason}}">bulk upload voters (disabled: {{modify_voters_disabled_reason}})</button>
+{% endif %}
 </p>
 
 {% if voter_files %}
@@ -70,7 +81,7 @@ Prior Bulk Uploads:
 {% else %}
 {{vf.voter_file_content|length}}
 {% endif %}
- bytes, at {{vf.uploaded_at}}:
+ bytes, at {{vf.uploaded_at|utc_time}}:
 {% if vf.processing_finished_at %}
 <em>done processing: {{vf.num_voters}} voters loaded</em>
 {% else %}
@@ -87,6 +98,16 @@ Prior Bulk Uploads:
 </ul>
 {% endif %}
 {% endif %}
+
+{% if admin_p and not election.frozen_at and election.num_voters > 0 %}
+<p>
+<form style="display: inline;" method="post" action="{% url "election@voters@clear" election.uuid %}" onsubmit="return confirm('Are you sure you want to remove ALL {{election.num_voters}} voter(s)? This action cannot be undone.');">
+<input type="hidden" name="csrf_token" value="{{csrf_token}}" />
+<input class="button alert" type="submit" value="clear all voters" />
+</form>
+</p>
+{% endif %}
+
 {% endif %}
 
 {% if voters %}
@@ -134,9 +155,13 @@ Voters {{voters_page.start_index}} - {{voters_page.end_index}} (of {{total_voter
 {% if admin_p %}
 <td style="white-space: nowrap;">
 {% if election.frozen_at %}
+{% if can_send_emails %}
 [<a href="{% url "election@voters@email" election.uuid %}?voter_id={{voter.voter_login_id}}">email</a>]
+{% else %}
+[<span style="opacity: 0.5; cursor: not-allowed;" title="{{email_disabled_reason}}">email</span>]
 {% endif %}
-[<a onclick="return confirm('are you sure you want to remove {{voter.name}} ?');" href="{% url "election@voter@delete" election.uuid voter.uuid %}">x</a>]
+{% endif %}
+{% if can_modify_voters %}[<form class="inline-action" method="post" action="{% url "election@voter@delete" election.uuid voter.uuid %}" onsubmit="return confirm('are you sure you want to remove {{voter.name}} ?');"><input type="hidden" name="csrf_token" value="{{csrf_token}}" /><button type="submit" class="link-button">x</button></form>]{% endif %}
 </td>
 <td>{{voter.voter_login_id}}</td>
 <td>{{voter.voter_email}}</td>

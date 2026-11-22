@@ -7,8 +7,11 @@ Ben Adida
 (ben@adida.net)
 """
 from django.db import models
+from django.db.models import Q, UniqueConstraint
+from django.db.models.functions import Lower
+from django.utils.html import format_html
 
-from .auth_systems import can_check_constraint, AUTH_SYSTEMS
+from .auth_systems import can_check_constraint, uses_case_insensitive_user_id, AUTH_SYSTEMS
 from .jsonfield import JSONField
 
 
@@ -34,6 +37,12 @@ class User(models.Model):
   class Meta:
     unique_together = (('user_type', 'user_id'),)
     app_label = 'helios_auth'
+    constraints = [
+      # auth systems with CASE_INSENSITIVE_USER_ID must not have user_ids that differ only in case.
+      # keep this list in sync with those auth systems.
+      UniqueConstraint(Lower('user_id'), 'user_type', condition=Q(user_type='github'),
+                       name='helios_auth_user_ci_unique_github'),
+    ]
 
   @classmethod
   def _get_type_and_id(cls, user_type, user_id):
@@ -45,12 +54,24 @@ class User(models.Model):
     
   @classmethod
   def get_by_type_and_id(cls, user_type, user_id):
-    return cls.objects.get(user_type = user_type, user_id = user_id)
+    if uses_case_insensitive_user_id(user_type):
+      return cls.objects.get(user_type=user_type, user_id__iexact=user_id)
+    return cls.objects.get(user_type=user_type, user_id=user_id)
   
   @classmethod
   def update_or_create(cls, user_type, user_id, name=None, info=None, token=None):
-    obj, created_p = cls.objects.get_or_create(user_type = user_type, user_id = user_id, defaults = {'name': name, 'info':info, 'token':token})
-    
+    case_insensitive = uses_case_insensitive_user_id(user_type)
+
+    if case_insensitive:
+      try:
+        obj = cls.objects.get(user_type=user_type, user_id__iexact=user_id)
+        created_p = False
+      except cls.DoesNotExist:
+        obj = cls.objects.create(user_type=user_type, user_id=user_id, name=name, info=info, token=token)
+        created_p = True
+    else:
+      obj, created_p = cls.objects.get_or_create(user_type=user_type, user_id=user_id, defaults={'name': name, 'info': info, 'token': token})
+
     if not created_p:
       # special case the password: don't replace it if it exists
       if 'password' in obj.info:
@@ -59,6 +80,9 @@ class User(models.Model):
       obj.info = info
       obj.name = name
       obj.token = token
+      # For case-insensitive systems, update user_id to preserve the current case
+      if case_insensitive:
+        obj.user_id = user_id
       obj.save()
 
     return obj
@@ -134,6 +158,9 @@ class User(models.Model):
       return self.type_and_id == other.type_and_id
     else:
       return False
+
+  # defining __eq__ removes the inherited __hash__, which breaks the ORM's delete()
+  __hash__ = models.Model.__hash__
   
 
   @property
@@ -158,11 +185,11 @@ class User(models.Model):
     public_url = self.public_url
     
     if public_url:
-      name_display = '<a href="%s">%s</a>' % (public_url, self.pretty_name)
+      name_display = format_html('<a href="{}">{}</a>', public_url, self.pretty_name)
     else:
       name_display = self.pretty_name
 
-    return """<img class="%s-logo" src="/static/auth/login-icons/%s.png" alt="%s" /> %s""" % (
+    return format_html('<img class="{}-logo" src="/static/auth/login-icons/{}.png" alt="{}" /> {}',
       size, self.user_type, self.user_type, name_display)
 
   @property

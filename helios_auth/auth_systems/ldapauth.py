@@ -14,6 +14,8 @@ from django.http import HttpResponseRedirect
 from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 
+from helios_auth.utils import format_recipient, same_site_path
+
 # some parameters to indicate that status updating is possible
 STATUS_UPDATES = False
 
@@ -29,18 +31,21 @@ def ldap_login_view(request):
     from helios_auth.view_utils import render_template
     from helios_auth.views import after
     from helios_auth.auth_systems.ldapbackend import backend
+    from helios_auth.security import check_csrf
 
     error = None
 
     if request.method == "GET":
         form = LoginForm()
     else:
+        check_csrf(request)
+
         form = LoginForm(request.POST)
 
         request.session['auth_system_name'] = 'ldap'
 
         if 'return_url' in request.POST:
-            request.session['auth_return_url'] = request.POST.get('return_url')
+            request.session['auth_return_url'] = same_site_path(request.POST.get('return_url'))
 
         if form.is_valid():
             username = form.cleaned_data['username'].strip()
@@ -85,9 +90,8 @@ def send_message(user_id, name, user_info, subject, body):
         subject,
         body,
         settings.SERVER_EMAIL,
-        [f"{name} <{user_info['email']}>"],
+        [format_recipient(name, user_info['email'])],
         fail_silently=False,
-        html_message=body,
     )
 
 

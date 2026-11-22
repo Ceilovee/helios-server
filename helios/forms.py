@@ -5,9 +5,8 @@ Forms for Helios
 from django import forms
 from django.conf import settings
 
-from .fields import SplitDateTimeField
+from .fields import DateTimeLocalField
 from .models import Election
-from .widgets import SplitSelectDateTimeWidget
 
 
 class ElectionForm(forms.Form):
@@ -25,19 +24,30 @@ class ElectionForm(forms.Form):
     election_info_url = forms.CharField(required=False, initial="", label="Election Info Download URL", help_text="the URL of a PDF document that contains extra election information, e.g. candidate bios and statements")
   
   # times
-  voting_starts_at = SplitDateTimeField(help_text = 'UTC date and time when voting begins',
-                                   widget=SplitSelectDateTimeWidget, required=False)
-  voting_ends_at = SplitDateTimeField(help_text = 'UTC date and time when voting ends',
-                                   widget=SplitSelectDateTimeWidget, required=False)
+  voting_starts_at = DateTimeLocalField(help_text = 'UTC date and time when voting begins',
+                                   required=False)
+  voting_ends_at = DateTimeLocalField(help_text = 'UTC date and time when voting ends',
+                                   required=False)
 
 class ElectionTimeExtensionForm(forms.Form):
-  voting_extended_until = SplitDateTimeField(help_text = 'UTC date and time voting extended to',
-                                   widget=SplitSelectDateTimeWidget, required=False)
+  voting_extended_until = DateTimeLocalField(help_text = 'UTC date and time voting extended to',
+                                   required=False)
   
 class EmailVotersForm(forms.Form):
   subject = forms.CharField(max_length=80)
   body = forms.CharField(max_length=4000, widget=forms.Textarea)
   send_to = forms.ChoiceField(label="Send To", initial="all", choices= [('all', 'all voters'), ('voted', 'voters who have cast a ballot'), ('not-voted', 'voters who have not yet cast a ballot')])
+
+  # placeholders shown in the email preview, which voters would receive literally
+  PREVIEW_PLACEHOLDERS = ['<SUBJECT>', '<BODY>', '<VOTER_NAME>', '<VOTER_LOGIN_ID>', '<VOTER_PASSWORD>', '<SMART_TRACKER>']
+
+  def clean(self):
+    cleaned_data = super().clean()
+    for field in ['subject', 'body']:
+      placeholders = [p for p in self.PREVIEW_PLACEHOLDERS if p in cleaned_data.get(field, '')]
+      if placeholders:
+        self.add_error(field, "Remove %s: it is only shown in the preview, and voters would receive it as is. Helios fills in each voter's details itself, so this box is only for your own message." % ", ".join(placeholders))
+    return cleaned_data
 
 class TallyNotificationEmailForm(forms.Form):
   subject = forms.CharField(max_length=80)
@@ -47,4 +57,7 @@ class TallyNotificationEmailForm(forms.Form):
 class VoterPasswordForm(forms.Form):
   voter_id = forms.CharField(max_length=50, label="Voter ID")
   password = forms.CharField(widget=forms.PasswordInput(), max_length=100)
+
+class VoterPasswordResendForm(forms.Form):
+  voter_id = forms.CharField(max_length=50, label="Voter ID", help_text="Enter the voter ID you were assigned for this election")
 

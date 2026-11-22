@@ -45,10 +45,6 @@ DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
         'NAME': 'helios',
-        'USER': 'helios',
-        'PASSWORD': 'helios',
-        'HOST': 'localhost',
-        'PORT': '5432',
         'CONN_MAX_AGE': 600,
     },
 }
@@ -56,7 +52,8 @@ DATABASES = {
 # override if we have an env variable
 if get_from_env('DATABASE_URL', None):
     import dj_database_url
-    DATABASES['default'] = dj_database_url.config(conn_max_age=600, ssl_require=True)
+    _db_ssl = get_from_env('DATABASE_SSL_REQUIRE', '1') == '1'
+    DATABASES['default'] = dj_database_url.config(conn_max_age=600, ssl_require=_db_ssl)
     DATABASES['default']['ENGINE'] = 'django.db.backends.postgresql'
 
 # explicitly set the default auto-created primary field to silence warning models.W042
@@ -105,7 +102,7 @@ EMAIL_OPTOUT_SECRET = get_from_env('EMAIL_OPTOUT_SECRET', 'replace-with-secure-r
 # If in production, you got a bad request (400) error
 #More info: https://docs.djangoproject.com/en/1.7/ref/settings/#allowed-hosts (same for 1.6)
 
-ALLOWED_HOSTS = ['127.0.0.1', 'localhost','192.168.1.32','192.168.100.10', '192.168.100.11']
+ALLOWED_HOSTS = get_from_env('ALLOWED_HOSTS', 'localhost').split(",")
 
 # Secure Stuff
 if get_from_env('SSL', '0') == '1':
@@ -116,6 +113,13 @@ if get_from_env('SSL', '0') == '1':
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 SESSION_COOKIE_HTTPONLY = True
+
+# Set this explicitly rather than relying on the Django default: it is a load-bearing
+# part of our CSRF defense, since Helios does its own CSRF checking (check_csrf) rather
+# than using Django's CsrfViewMiddleware. 'Lax' keeps the session cookie off every
+# cross-site POST and off cross-site GET subresources (images, iframes, fetch), while
+# still allowing ordinary inbound links to Helios to stay logged in.
+SESSION_COOKIE_SAMESITE = get_from_env('SESSION_COOKIE_SAMESITE', 'Lax')
 
 # let's go with one year because that's the way to do it now
 STS = False
@@ -129,12 +133,42 @@ if get_from_env('HSTS', '0') == '1':
 SECURE_BROWSER_XSS_FILTER = True
 SECURE_CONTENT_TYPE_NOSNIFF = True
 
+# Content Security Policy Configuration (django-csp)
+# https://django-csp.readthedocs.io/
+#
+# 'unsafe-inline' and 'unsafe-eval' are required due to legacy inline scripts,
+# onclick handlers, and jQuery JSON eval usage. Future improvement: use nonces.
+
+CSP_DEFAULT_SRC = ("'self'",)
+CSP_SCRIPT_SRC = ("'self'", "'unsafe-inline'", "'unsafe-eval'")
+CSP_STYLE_SRC = ("'self'", "'unsafe-inline'")
+CSP_IMG_SRC = ("'self'", "data:")
+CSP_FONT_SRC = ("'self'",)
+CSP_CONNECT_SRC = ("'self'",)
+CSP_WORKER_SRC = ("'self'", "blob:")
+CSP_FORM_ACTION = ("'self'",)
+CSP_FRAME_ANCESTORS = ("'self'",)
+CSP_BASE_URI = ("'self'",)
+CSP_OBJECT_SRC = ("'none'",)
+
+# Set CSP_REPORT_ONLY=1 to test without enforcing
+if get_from_env('CSP_REPORT_ONLY', '0') == '1':
+    CSP_REPORT_ONLY = True
+else:
+    CSP_REPORT_ONLY = False
+
+# Optional: URI to receive CSP violation reports
+_csp_report_uri = get_from_env('CSP_REPORT_URI', None)
+if _csp_report_uri:
+    CSP_REPORT_URI = _csp_report_uri
+
 SILENCED_SYSTEM_CHECKS = ['urls.W002']
 
 MIDDLEWARE = [
     # secure a bunch of things
     'django.middleware.security.SecurityMiddleware',
     'helios.security.HSTSMiddleware',
+    'csp.middleware.CSPMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     # 'django.middleware.csrf.CsrfViewMiddleware',
 
@@ -170,16 +204,24 @@ INSTALLED_APPS = (
     'django.contrib.sessions',
     'django.contrib.sites',
     'anymail',
+    'django_tasks',
+    'django_tasks_db',
     ## HELIOS stuff
     'helios_auth',
     'helios',
     'server_ui',
 )
 
+# Email backend configuration
+# In development mode, set EMAIL_USE_CONSOLE=1 to print emails to stdout
+if DEBUG and get_from_env('EMAIL_USE_CONSOLE', '0') == '1':
+    EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+
 ANYMAIL = {
     "MAILGUN_API_KEY": get_from_env('MAILGUN_API_KEY', None),
 }
 
+# Mailgun overrides console backend if configured
 if ANYMAIL["MAILGUN_API_KEY"]:
     EMAIL_BACKEND = "anymail.backends.mailgun.EmailBackend"
 
@@ -204,7 +246,7 @@ LOGOUT_ON_CONFIRMATION = True
 
 # The two hosts are here so the main site can be over plain HTTP
 # while the voting URLs are served over SSL.
-URL_HOST = get_from_env("URL_HOST", "http://192.168.100.10:8000").rstrip("/")
+URL_HOST = get_from_env("URL_HOST", "http://localhost:8000").rstrip("/")
 
 # IMPORTANT: you should not change this setting once you've created
 # elections, as your elections' cast_url will then be incorrect.
@@ -230,14 +272,22 @@ HELIOS_ADMIN_ONLY = False
 HELIOS_VOTERS_UPLOAD = True
 HELIOS_VOTERS_EMAIL = True
 
+# Number of weeks after tallying when voter emails should be disabled
+HELIOS_VOTER_EMAIL_CUTOFF_WEEKS = int(get_from_env('HELIOS_VOTER_EMAIL_CUTOFF_WEEKS', '3'))
+
 # are elections private by default?
 HELIOS_PRIVATE_DEFAULT = False
 
 # authentication systems enabled
-# AUTH_ENABLED_SYSTEMS = ['password','facebook','twitter', 'google', 'yahoo']
+# AUTH_ENABLED_SYSTEMS = ['password','facebook', 'google', 'yahoo']
 AUTH_ENABLED_SYSTEMS = get_from_env('AUTH_ENABLED_SYSTEMS',
                                     get_from_env('AUTH_ENABLED_AUTH_SYSTEMS', 'ldap,password,google,facebook')
                                     ).split(",")
+
+# Add development login in debug mode
+if DEBUG:
+    AUTH_ENABLED_SYSTEMS = ['devlogin'] + AUTH_ENABLED_SYSTEMS
+
 AUTH_DEFAULT_SYSTEM = get_from_env('AUTH_DEFAULT_SYSTEM', get_from_env('AUTH_DEFAULT_AUTH_SYSTEM', None))
 
 # google
@@ -249,28 +299,15 @@ FACEBOOK_APP_ID = get_from_env('FACEBOOK_APP_ID','')
 FACEBOOK_API_KEY = get_from_env('FACEBOOK_API_KEY','')
 FACEBOOK_API_SECRET = get_from_env('FACEBOOK_API_SECRET','')
 
-# twitter
-TWITTER_API_KEY = ''
-TWITTER_API_SECRET = ''
-TWITTER_USER_TO_FOLLOW = 'heliosvoting'
-TWITTER_REASON_TO_FOLLOW = "we can direct-message you when the result has been computed in an election in which you participated"
-
-# the token for Helios to do direct messaging
-TWITTER_DM_TOKEN = {"oauth_token": "", "oauth_token_secret": "", "user_id": "", "screen_name": ""}
-
 # LinkedIn
-LINKEDIN_API_KEY = ''
-LINKEDIN_API_SECRET = ''
+LINKEDIN_CLIENT_ID = get_from_env('LINKEDIN_CLIENT_ID', '')
+LINKEDIN_CLIENT_SECRET = get_from_env('LINKEDIN_CLIENT_SECRET', '')
 
 # CAS (for universities)
 CAS_USERNAME = get_from_env('CAS_USERNAME', "")
 CAS_PASSWORD = get_from_env('CAS_PASSWORD', "")
 CAS_ELIGIBILITY_URL = get_from_env('CAS_ELIGIBILITY_URL', "")
 CAS_ELIGIBILITY_REALM = get_from_env('CAS_ELIGIBILITY_REALM', "")
-
-# Clever
-CLEVER_CLIENT_ID = get_from_env('CLEVER_CLIENT_ID', "")
-CLEVER_CLIENT_SECRET = get_from_env('CLEVER_CLIENT_SECRET', "")
 
 # GitHub
 GH_CLIENT_ID = get_from_env('GH_CLIENT_ID', '')
@@ -290,12 +327,8 @@ EMAIL_USE_TLS = (get_from_env('EMAIL_USE_TLS', '0') == '1')
 # to use AWS Simple Email Service
 # in which case environment should contain
 # AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
-#if get_from_env('EMAIL_USE_AWS', '0') == '1':
-#    EMAIL_BACKEND = 'django_ses.SESBackend'
-    
-# otherwise, if we're testing, we just print emails to the console
-EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
-
+if get_from_env('EMAIL_USE_AWS', '0') == '1':
+    EMAIL_BACKEND = 'django_ses.SESBackend'
 
 # set up logging
 import logging
@@ -305,11 +338,8 @@ logging.basicConfig(
     format='%(asctime)s %(levelname)s %(message)s'
 )
 
-# set up celery
-CELERY_BROKER_URL = get_from_env('CELERY_BROKER_URL', 'amqp://localhost')
-if TESTING:
-    CELERY_TASK_ALWAYS_EAGER = True
-#database_url = DATABASES['default']
+# background tasks are stored in the database and run by `manage.py db_worker`
+TASKS = {'default': {'BACKEND': 'django_tasks_db.DatabaseBackend', 'QUEUES': ['default']}}
 
 # Rollbar Error Logging
 ROLLBAR_ACCESS_TOKEN = get_from_env('ROLLBAR_ACCESS_TOKEN', None)
@@ -324,10 +354,10 @@ if ROLLBAR_ACCESS_TOKEN:
 
 # ldap
 # see configuration example at https://pythonhosted.org/django-auth-ldap/example.html
-AUTH_LDAP_SERVER_URI = "ldap://localhost" # replace by your Ldap URI
-AUTH_LDAP_BIND_DN = "cn=admin,dc=localhost,dc=com"
-AUTH_LDAP_BIND_PASSWORD = "cielo"
-AUTH_LDAP_USER_SEARCH = LDAPSearch("ou=People,dc=localhost,dc=com",
+AUTH_LDAP_SERVER_URI = "ldap://ldap.forumsys.com" # replace by your Ldap URI
+AUTH_LDAP_BIND_DN = "cn=read-only-admin,dc=example,dc=com"
+AUTH_LDAP_BIND_PASSWORD = "password"
+AUTH_LDAP_USER_SEARCH = LDAPSearch("dc=example,dc=com",
     ldap.SCOPE_SUBTREE, "(uid=%(user)s)"
 )
 
