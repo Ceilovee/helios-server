@@ -1033,7 +1033,7 @@ def one_election_cast_rejected(request, election):
     if voter.user == user and voter.user is not None:
       logout = settings.LOGOUT_ON_CONFIRMATION
     else:
-      del request.session['CURRENT_VOTER_ID']
+      request.session.pop('CURRENT_VOTER_ID', None)
 
   return render_template(request, 'cast_rejected', {'election': election, 'logout': logout},
                          include_user=(not logout))
